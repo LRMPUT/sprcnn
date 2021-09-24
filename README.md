@@ -1,6 +1,6 @@
 # Stereo Plane R-CNN
 
-![schematic](https://github.com/LRMPUT/sprcnn/images/sprcnn.jpg)
+![schematic](https://github.com/LRMPUT/sprcnn/raw/master/images/sprcnn.jpg)
 
 ## Instalation
 
