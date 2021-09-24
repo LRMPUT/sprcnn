@@ -1,6 +1,9 @@
-cffi==1.11.5
-numpy==1.15.4
-opencv-python==3.4.4.19
-scikit-image==0.14.1
-torch==0.4.1
-tqdm==4.28.1
+torch==1.8.1
+torchvision==0.9.1
+torchmetrics==0.3.1
+numpy==1.19.2
+scikit-image==0.15.0
+scipy==1.5.2
+opencv-python==3.4.1.15
+disjoint-set==0.7.1
+pytorch-lightning>=1.2.8
