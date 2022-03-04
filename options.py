@@ -200,8 +200,20 @@ def parse_args():
                         help='annotations directory',
                         default='annotation', type=str)
 
+    parser.add_argument('--use_annotations', dest='use_annotations',
+                        help='Flag to use annotations',
+                        action='store_true')
+
+    parser.add_argument('--export_detections', dest='export_detections',
+                        help='Flag to export detections',
+                        action='store_true')
+
+    parser.add_argument('--evaluate_descriptors', dest='evaluate_descriptors',
+                        help='Flag to evaluate descriptors',
+                        action='store_true')
+
     parser.add_argument('--no_normals', dest='no_normals',
-                        help='Flag to not use annotations',
+                        help='Flag to not use normals',
                         action='store_true')
 
     parser.add_argument('--crop_ratio', dest='crop_ratio',

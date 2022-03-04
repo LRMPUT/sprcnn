@@ -34,8 +34,17 @@ python train_planercnn.py --dataFolder=/mnt/data/datasets/scenenet_rgbd --anchor
 Pretrained model can be downloaded [here](https://putpoznanpl-my.sharepoint.com/:f:/g/personal/jan_wietrzykowski_put_poznan_pl/EgQqJVYSoLNJrkw3qWLqZ9IBUf8M0shHE8XNA74cwEs4ww?e=FyjB4g).
 
 ```bash
-python evaluate.py --anchorType=none_exp_plane_params --dataFolder=/mnt/data/datasets/TERRINet --checkpoint=/mnt/data/datasets/scenenet_rgbd/checkpoint/plane_params.ckpt --no_normals --annotation_dir=annotation_plane_params
+python evaluate.py --anchorType=none_exp_plane_params --dataFolder=/mnt/data/datasets/TERRINet --checkpoint=/mnt/data/datasets/scenenet_rgbd/checkpoint/plane_params.ckpt --no_normals
 ```
+
+## Exporting detections for PlaneLoc2
+
+Before running the following command, make sure that contents of `annotations_plane_params_det` dir in each scene directory is empty. 
+
+```bash
+python evaluate.py --anchorType=none_exp_plane_params --dataFolder=/mnt/data/datasets/TERRINet --checkpoint=/mnt/data/datasets/scenenet_rgbd/checkpoint/plane_params.ckpt --no_normals --export_detections
+```
+Detections should be exported to `annotations_plane_params_det` dir in each scene directory.
 
 ## Acknowledgement
 

@@ -35,6 +35,9 @@ def train(options):
         dataset_test = ScenenetRgbdDataset(options, config, split='test', random=False)
     test_loader = DataLoader(dataset_test, batch_size=1, shuffle=False, num_workers=4)
 
+    print('num_plane_ids: %d' % dataset.get_num_plane_ids())
+    options.num_plane_ids = dataset.get_num_plane_ids()
+
     # profiler = PyTorchProfiler(use_cuda=True, profile_memory=True, record_shapes=True)
     # profiler = SimpleProfiler()
     model = MaskRCNN(config, options)
@@ -47,9 +50,9 @@ def train(options):
     #                                       strict=False)
 
     if options.checkpoint == '':
-        trainer = pl.Trainer(gpus=1, max_epochs=options.numEpochs, limit_val_batches=500)
+        trainer = pl.Trainer(gpus=1, max_epochs=options.numEpochs)
     else:
-        trainer = pl.Trainer(gpus=1, max_epochs=options.numEpochs, limit_val_batches=500,
+        trainer = pl.Trainer(gpus=1, max_epochs=options.numEpochs,
                              resume_from_checkpoint=options.checkpoint)
 
     trainer.fit(model, train_loader, test_loader)

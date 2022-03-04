@@ -640,7 +640,7 @@ def bbox_overlaps(boxes1, boxes2):
     return overlaps
 
 
-def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_parameters, config, camera):
+def detection_target_layer(proposals, gt_class_ids, gt_plane_ids, gt_boxes, gt_masks, gt_parameters, config, camera):
     """Subsamples proposals and generates target box refinment, class_ids,
     and cur_masks for each.
 
@@ -670,6 +670,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
 
     rois = torch.zeros((bsize, config.TRAIN_ROIS_PER_IMAGE, 4), device=device)
     roi_gt_class_ids = torch.zeros((bsize, config.TRAIN_ROIS_PER_IMAGE), device=device)
+    roi_gt_plane_ids = torch.zeros((bsize, config.TRAIN_ROIS_PER_IMAGE), device=device)
     deltas = torch.zeros((bsize, config.TRAIN_ROIS_PER_IMAGE, 4), device=device)
     masks = torch.zeros((bsize, config.TRAIN_ROIS_PER_IMAGE, config.MASK_SHAPE[0], config.MASK_SHAPE[1]), device=device)
     roi_gt_parameters = torch.zeros((bsize, config.TRAIN_ROIS_PER_IMAGE, config.NUM_PARAMETERS), device=device)
@@ -682,6 +683,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
         if len(valid_idxs) > 0:
             cur_proposals = proposals[b, :, :]
             cur_gt_class_ids = gt_class_ids[b, valid_idxs]
+            cur_gt_plane_ids = gt_plane_ids[b, valid_idxs]
             cur_gt_boxes = gt_boxes[b, valid_idxs, :]
             cur_gt_masks = gt_masks[b, valid_idxs, :, :]
             cur_gt_parameters = gt_parameters[b, valid_idxs, :]
@@ -715,6 +717,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
                 roi_gt_box_assignment = torch.max(positive_overlaps, dim=1)[1]
                 cur_roi_gt_boxes = cur_gt_boxes[roi_gt_box_assignment, :]
                 cur_roi_gt_class_ids = cur_gt_class_ids[roi_gt_box_assignment]
+                cur_roi_gt_plane_ids = cur_gt_plane_ids[roi_gt_box_assignment]
                 cur_roi_gt_parameters = cur_gt_parameters[roi_gt_box_assignment]
 
                 ## Compute bbox refinement for positive ROIs
@@ -778,6 +781,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
                 cur_plane_params = roi_gt_normals_uvd
 
                 roi_gt_class_ids[b, 0:positive_count] = cur_roi_gt_class_ids
+                roi_gt_plane_ids[b, 0:positive_count] = cur_roi_gt_plane_ids
                 deltas[b, 0:positive_count, :] = cur_deltas
                 masks[b, 0:positive_count, :, :] = cur_masks
                 roi_gt_parameters[b, 0:positive_count, :] = cur_roi_gt_parameters
@@ -808,7 +812,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
 
             rois[b, 0:(positive_count + negative_count), :] = torch.cat([positive_rois, negative_rois], dim=0)
 
-    return rois, roi_gt_class_ids, deltas, masks, roi_gt_parameters, plane_params
+    return rois, roi_gt_class_ids, deltas, masks, plane_params, roi_gt_plane_ids
 
 
 ############################################################
@@ -824,8 +828,12 @@ def clip_to_window(window, boxes):
     return boxes
 
 
-def refine_detections(rois, probs, deltas, parameters,
-                      window, config, return_indices=False, use_nms=1, one_hot=True):
+def refine_detections(rois,
+                      probs,
+                      deltas,
+                      plane_id_desc,
+                      window,
+                      config, return_indices=False, use_nms=1, one_hot=True):
     """Refine classified proposals and filter overlaps and return final
     detections.
 
@@ -845,7 +853,7 @@ def refine_detections(rois, probs, deltas, parameters,
     tensor_type = rois.type()
 
     ## Class IDs per ROI
-    
+
     if len(probs.shape) == 1:
         class_ids = probs.long()
     else:
@@ -859,11 +867,12 @@ def refine_detections(rois, probs, deltas, parameters,
     if len(probs.shape) == 1:
         class_scores = torch.ones(class_ids.shape, device=dev)
         deltas_specific = deltas
-        class_parameters = parameters
     else:
         class_scores = probs[idx, class_ids.data]
         deltas_specific = deltas[idx, class_ids.data]
-        class_parameters = parameters[idx, class_ids.data]
+
+    class_parameters = torch.zeros((class_ids.shape[0], config.NUM_PARAMETERS), device=dev)
+
     ## Apply bounding box deltas
     ## Shape: [boxes, (y1, x1, y2, x2)] in normalized coordinates
     std_dev = torch.from_numpy(np.reshape(config.RPN_BBOX_STD_DEV, [1, 4])).type(tensor_type)
@@ -879,7 +888,7 @@ def refine_detections(rois, probs, deltas, parameters,
 
     ## Round and cast to int since we're deadling with pixels now
     refined_rois = torch.round(refined_rois)
-    
+
     ## TODO: Filter out boxes with zero area
 
     ## Filter out background boxes
@@ -893,13 +902,13 @@ def refine_detections(rois, probs, deltas, parameters,
 
     if keep_bool.sum() == 0:
         if return_indices:
-            return [torch.zeros((0, 4 + 2 + config.NUM_PARAMETERS), device=dev, dtype=dtype),
+            return [torch.zeros((0, 4 + 2 + config.NUM_PARAMETERS + config.DESC_LEN), device=dev, dtype=dtype),
                     torch.zeros(0, device=dev, dtype=torch.long),
                     torch.zeros((0, 4), device=dev, dtype=dtype)]
         else:
-            return torch.zeros((0,  4 + 2 + config.NUM_PARAMETERS), device=dev, dtype=dtype)
+            return torch.zeros((0,  4 + 2 + config.NUM_PARAMETERS + config.DESC_LEN), device=dev, dtype=dtype)
         pass
-        
+
     keep = torch.nonzero(keep_bool)[:,0]
 
     if use_nms == 2:
@@ -914,13 +923,13 @@ def refine_detections(rois, probs, deltas, parameters,
         ix_scores = pre_nms_scores
         ix_scores, order = ix_scores.sort(descending=True)
         ix_rois = ix_rois[order.data,:]
-        
+
         # nms_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
         nms_keep = torchvision.ops.nms(ix_rois.index_select(1, torch.tensor([1, 0, 3, 2], device=dev, dtype=torch.long)),
                                        ix_scores,
                                        config.DETECTION_NMS_THRESHOLD)
         nms_keep = keep[ixs[order[nms_keep].data].data]
-        keep = intersect1d(keep, nms_keep)        
+        keep = intersect1d(keep, nms_keep)
     elif use_nms == 1:
         ## Apply per-class NMS
         pre_nms_class_ids = class_ids[keep.data]
@@ -961,12 +970,13 @@ def refine_detections(rois, probs, deltas, parameters,
 
     ### Apply plane anchors
     # class_parameters = config.applyAnchorsTensor(class_ids, class_parameters)
-    ## Arrange output as [N, (y1, x1, y2, x2, class_id, score, parameters)]
+    ## Arrange output as [N, (y1, x1, y2, x2, class_id, score, parameters, desc)]
     ## Coordinates are in image domain.
     result = torch.cat((refined_rois[keep.data],
                         class_ids[keep.data].unsqueeze(1).float(),
                         class_scores[keep.data].unsqueeze(1),
-                        class_parameters[keep.data]), dim=1)
+                        class_parameters[keep.data],
+                        plane_id_desc[keep.data]), dim=1)
 
     if return_indices:
         ori_rois = rois * scale
@@ -974,11 +984,15 @@ def refine_detections(rois, probs, deltas, parameters,
         ori_rois = torch.round(ori_rois)
         ori_rois = ori_rois[keep.data]
         return result, keep.data, ori_rois
-    
+
     return result
 
 
-def detection_layer(config, rois, mrcnn_class, mrcnn_bbox, mrcnn_parameter,
+def detection_layer(config,
+                    rois,
+                    mrcnn_class,
+                    mrcnn_bbox,
+                    mrcnn_plane_id_desc,
                     image_meta, use_nms=1, one_hot=True):
     """Takes classified proposal boxes and their bounding box deltas and
     returns the final detection boxes.
@@ -992,19 +1006,22 @@ def detection_layer(config, rois, mrcnn_class, mrcnn_bbox, mrcnn_parameter,
     bsize = rois.shape[0]
     device = rois.device
 
-    detections = torch.zeros((bsize, config.DETECTION_MAX_INSTANCES, 4 + 2 + config.NUM_PARAMETERS), device=device)
+    detections = torch.zeros((bsize,
+                              config.DETECTION_MAX_INSTANCES,
+                              4 + 2 + config.NUM_PARAMETERS + config.DESC_LEN),
+                             device=device)
 
     for b in range(bsize):
         cur_detections = refine_detections(rois[b, :, :],
                                            mrcnn_class[b, :, :],
                                            mrcnn_bbox[b, :, :, :],
-                                           mrcnn_parameter[b, :, :, :],
+                                           mrcnn_plane_id_desc[b, :, :],
                                            window[b, :],
                                            config,
                                            use_nms=use_nms, one_hot=one_hot)
         num_detections = cur_detections.shape[0]
         detections[b, 0:num_detections, :] = cur_detections
-        
+
     return detections
 
 
@@ -1071,13 +1088,14 @@ class RPN(nn.Module):
 ############################################################
 
 class Classifier(nn.Module):
-    def __init__(self, depth, pool_size, image_shape, num_classes, num_parameters, debug=False):
+    def __init__(self, depth, pool_size, image_shape, num_classes, num_plane_ids, desc_len):
         super(Classifier, self).__init__()
         self.depth = depth
         self.pool_size = pool_size
         self.image_shape = image_shape
         self.num_classes = num_classes
-        self.num_parameters = num_parameters
+        self.num_plane_ids = num_plane_ids
+        self.desc_len = desc_len
         self.padding = SamePad2d(kernel_size=3, stride=1)
         # self.conv1 = nn.Conv2d(self.depth + 64, self.depth + 64, kernel_size=3, stride=1)
         # self.bn1 = nn.BatchNorm2d(self.depth + 64, eps=0.001, momentum=0.01)
@@ -1094,7 +1112,9 @@ class Classifier(nn.Module):
 
         self.linear_bbox = nn.Linear(1024, num_classes * 4)
 
-        self.linear_parameters = nn.Linear(1024, num_classes * self.num_parameters)
+        self.linear_plane_id = nn.Linear(1024, self.desc_len)
+        self.dropout_plane_id = nn.Dropout(p=0.5)
+        self.linear_plane_id_2 = nn.Linear(self.desc_len, self.num_plane_ids)
 
     def forward(self, x, rois, ranges, pool_features=True):
         bsize = rois.shape[0]
@@ -1127,18 +1147,33 @@ class Classifier(nn.Module):
         mrcnn_bbox = self.linear_bbox(x)
         mrcnn_bbox = mrcnn_bbox.view(mrcnn_bbox.size()[0], -1, 4)
 
-        mrcnn_parameters = self.linear_parameters(x)
+        mrcnn_plane_id_desc = self.linear_plane_id(x)
+        # mrcnn_plane_id_desc = F.normalize(mrcnn_plane_id_desc, dim=1)
+        mrcnn_plane_id_desc_dropout = self.dropout_plane_id(mrcnn_plane_id_desc)
+        mrcnn_plane_id_logits = self.linear_plane_id_2(mrcnn_plane_id_desc_dropout)
+        mrcnn_plane_id_prob = self.softmax(mrcnn_plane_id_logits)
 
         mrcnn_class_logits = mrcnn_class_logits.view(bsize, nsize, self.num_classes)
         mrcnn_probs = mrcnn_probs.view(bsize, nsize, self.num_classes)
         mrcnn_bbox = mrcnn_bbox.view(bsize, nsize, self.num_classes, 4)
-        mrcnn_parameters = mrcnn_parameters.view(bsize, nsize, self.num_classes, self.num_parameters)
+        mrcnn_plane_id_desc = mrcnn_plane_id_desc.view(bsize, nsize, self.desc_len)
+        mrcnn_plane_id_logits = mrcnn_plane_id_logits.view(bsize, nsize, self.num_plane_ids)
+        # mrcnn_plane_id_prob = mrcnn_plane_id_prob.view(bsize, nsize, self.num_plane_ids)
         roi_features = roi_features.view(bsize, nsize, self.depth + 64, self.pool_size, self.pool_size)
 
         if pool_features:
-            return [mrcnn_class_logits, mrcnn_probs, mrcnn_bbox, mrcnn_parameters, roi_features]
+            return [mrcnn_class_logits,
+                    mrcnn_probs,
+                    mrcnn_bbox,
+                    mrcnn_plane_id_desc,
+                    mrcnn_plane_id_logits,
+                    roi_features]
         else:
-            return [mrcnn_class_logits, mrcnn_probs, mrcnn_bbox, mrcnn_parameters]
+            return [mrcnn_class_logits,
+                    mrcnn_probs,
+                    mrcnn_bbox,
+                    mrcnn_plane_id_desc,
+                    mrcnn_plane_id_logits]
 
 
 class Mask(nn.Module):
@@ -1748,7 +1783,7 @@ def compute_mrcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
     return loss
 
 
-def compute_mrcnn_mask_loss(config, target_masks, target_class_ids, target_parameters, pred_masks):
+def compute_mrcnn_mask_loss(config, target_masks, target_class_ids, pred_masks):
     """Mask binary cross-entropy loss for the masks head.
 
     target_masks: [batch, num_rois, height, width].
@@ -1825,20 +1860,55 @@ def compute_mrcnn_plane_params_loss(config, camera, target_plane_params, mrcnn_p
     return loss
 
 
-def compute_losses(config, camera, rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids, mrcnn_class_logits,
-                   target_deltas, mrcnn_bbox, target_mask, mrcnn_mask, target_parameters, mrcnn_parameters,
-                   target_plane_params, mrcnn_plane_params):
+def compute_mrcnn_plane_id_loss(target_plane_ids, mrcnn_plane_id_logits, target_class_ids):
+    """Loss for the classifier head of Mask RCNN.
+
+    target_class_ids: [batch, num_rois]. Integer class IDs. Uses zero
+        padding to fill in the array.
+    pred_class_logits: [batch, num_rois, num_classes]
+    """
+    bsize = target_class_ids.shape[0]
+    nsize = target_class_ids.shape[1]
+
+    if (target_class_ids > 0).sum() > 0:
+        ## Only positive ROIs contribute to the loss. And only
+        ## the class specific mask of each ROI.
+        positive_roi_ix = torch.nonzero(target_class_ids > 0)
+
+        target_plane_ids_pos = target_plane_ids[positive_roi_ix[:, 0], positive_roi_ix[:, 1]]
+        mrcnn_plane_id_logits_pos = mrcnn_plane_id_logits[positive_roi_ix[:, 0], positive_roi_ix[:, 1], :]
+
+        loss = F.cross_entropy(mrcnn_plane_id_logits_pos,
+                               target_plane_ids_pos.long())
+    else:
+        loss = torch.tensor(0, device=target_class_ids.device)
+
+    return loss
+
+
+def compute_losses(config, camera, rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox,
+                   target_class_ids, mrcnn_class_logits,
+                   target_deltas, mrcnn_bbox,
+                   target_mask, mrcnn_mask,
+                   target_plane_params, mrcnn_plane_params,
+                   target_plane_ids, mrcnn_plane_id_logits):
 
     rpn_class_loss = compute_rpn_class_loss(rpn_match, rpn_class_logits)
     rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox)
     mrcnn_class_loss = compute_mrcnn_class_loss(target_class_ids, mrcnn_class_logits)
     mrcnn_bbox_loss = compute_mrcnn_bbox_loss(target_deltas, target_class_ids, mrcnn_bbox)
-    mrcnn_mask_loss = compute_mrcnn_mask_loss(config, target_mask, target_class_ids, target_parameters, mrcnn_mask)
-    mrcnn_parameter_loss = 100*compute_mrcnn_parameter_loss(target_parameters, target_class_ids, mrcnn_parameters)
+    mrcnn_mask_loss = compute_mrcnn_mask_loss(config, target_mask, target_class_ids, mrcnn_mask)
+    # mrcnn_parameter_loss = 100*compute_mrcnn_parameter_loss(target_parameters, target_class_ids, mrcnn_parameters)
     mrcnn_plane_params_loss = 100*compute_mrcnn_plane_params_loss(config, camera, target_plane_params, mrcnn_plane_params, target_class_ids)
+    mrcnn_plane_id_loss = compute_mrcnn_plane_id_loss(target_plane_ids, mrcnn_plane_id_logits, target_class_ids)
 
-    return [rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss, mrcnn_parameter_loss,
-            mrcnn_plane_params_loss]
+    return [rpn_class_loss,
+            rpn_bbox_loss,
+            mrcnn_class_loss,
+            mrcnn_bbox_loss,
+            mrcnn_mask_loss,
+            mrcnn_plane_params_loss,
+            mrcnn_plane_id_loss]
 
 
 ############################################################
@@ -1899,11 +1969,115 @@ class HistMeanMetric(torchmetrics.Metric):
         return hist_mean, self.area, self.count, total_mean
 
 
+class DescRankMetric(torchmetrics.Metric):
+    def __init__(self, desc_len, dist_sync_on_step=False):
+        super().__init__(compute_on_step=False, dist_sync_on_step=dist_sync_on_step)
+
+        self.desc_len = desc_len
+        self.add_state("plane_ids", default=[], dist_reduce_fx="cat")
+        self.add_state("descs", default=[], dist_reduce_fx="cat")
+        self.add_state("tss", default=[], dist_reduce_fx="cat")
+        self.add_state("cat_idxs", default=[], dist_reduce_fx="cat")
+        self.add_state("scene_ids", default=[], dist_reduce_fx="cat")
+
+    def update(self, plane_ids: torch.Tensor, descs: torch.Tensor, tss: torch.Tensor, cat_idxs: torch.Tensor, scene_ids):
+        self.plane_ids.extend(plane_ids.split(1))
+        self.descs.extend(descs.split(1))
+        self.tss.extend(tss.split(1))
+        self.cat_idxs.extend(cat_idxs.split(1))
+        self.scene_ids.extend(scene_ids)
+
+    def compute(self):
+        tss_thresh = 200.0
+
+        if len(self.plane_ids) > 0:
+            plane_ids = torch.cat(self.plane_ids)
+            descs = torch.cat(self.descs)
+            tss = torch.cat(self.tss)
+            cat_idxs = torch.cat(self.cat_idxs)
+
+            n_cats = int(cat_idxs.max()) + 1
+
+            rank_q0 = torch.zeros(n_cats, dtype=torch.long, device=self.device)
+            rank_q1 = torch.zeros(n_cats, dtype=torch.long, device=self.device)
+            rank_q2 = torch.zeros(n_cats, dtype=torch.long, device=self.device)
+            rank_q3 = torch.zeros(n_cats, dtype=torch.long, device=self.device)
+            rank_q4 = torch.zeros(n_cats, dtype=torch.long, device=self.device)
+            rank_mean = torch.zeros(n_cats, dtype=torch.long, device=self.device)
+
+            # convert string scene_id to integer scene_id
+            scene_id_idx = {}
+            for scene_id in self.scene_ids:
+                if scene_id not in scene_id_idx:
+                    idx = len(scene_id_idx)
+                    scene_id_idx[scene_id] = idx
+            scene_ids = torch.zeros_like(tss)
+            for i, scene_id in enumerate(self.scene_ids):
+                scene_ids[i] = scene_id_idx[scene_id]
+
+            ranks = [[] for i in range(n_cats)]
+            for n in range(len(descs)):
+                desc_diff = descs - descs[n, :].view(1, -1)
+                desc_dist = desc_diff.square().sum(dim=1)
+                sorted_idxs = torch.argsort(desc_dist)
+                sorted_plane_ids = plane_ids[sorted_idxs]
+                sorted_tss = tss[sorted_idxs]
+                sorted_scene_ids = scene_ids[sorted_idxs]
+                match_mask = torch.logical_and(sorted_plane_ids == plane_ids[n], sorted_idxs != n)
+                # if timestamp difference larger than threshold or different scene_id
+                tss_mask = torch.logical_or((sorted_tss - tss[n]).abs() > tss_thresh,
+                                            sorted_scene_ids != scene_ids[n])
+                match_mask = torch.logical_and(match_mask, tss_mask)
+                # reject neighboring frames and the plane itself
+                valid_mask = torch.logical_and(sorted_idxs != n, tss_mask)
+                match_idxs = torch.where(match_mask)[0]
+                valid_idxs = torch.where(valid_mask)[0]
+                if len(match_idxs) > 0:
+                    first_match = torch.min(match_idxs)
+                    # number of valid entries before and at the position of the first valid match
+                    num_valid = (valid_idxs <= first_match).sum()
+
+                    cat_idx = int(cat_idxs[n])
+                    ranks[cat_idx].append(num_valid)
+
+            for cat_idx in range(n_cats):
+                n = len(ranks[cat_idx])
+                if n > 0:
+                    ranks[cat_idx], _ = torch.sort(torch.stack(ranks[cat_idx]))
+                    rank_q1[cat_idx] = ranks[cat_idx][n // 4]
+                    rank_q2[cat_idx] = ranks[cat_idx][n // 2]
+                    rank_q3[cat_idx] = ranks[cat_idx][3 * n // 4]
+                    iqr = rank_q3[cat_idx] - rank_q1[cat_idx]
+                    mask = torch.logical_and(rank_q1[cat_idx] - 1.5 * iqr <= ranks[cat_idx],
+                                             ranks[cat_idx] <= rank_q3[cat_idx] + 1.5 * iqr)
+                    ranks[cat_idx] = ranks[cat_idx][mask]
+                    rank_q0[cat_idx] = ranks[cat_idx][0]
+                    rank_q4[cat_idx] = ranks[cat_idx][-1]
+                    rank_mean[cat_idx] = ranks[cat_idx].float().mean()
+
+        else:
+            rank_q0 = torch.zeros(0, dtype=torch.long, device=self.device)
+            rank_q1 = torch.zeros(0, dtype=torch.long, device=self.device)
+            rank_q2 = torch.zeros(0, dtype=torch.long, device=self.device)
+            rank_q3 = torch.zeros(0, dtype=torch.long, device=self.device)
+            rank_q4 = torch.zeros(0, dtype=torch.long, device=self.device)
+            rank_mean = torch.zeros(0, dtype=torch.long, device=self.device)
+
+        return rank_q0, rank_q1, rank_q2, rank_q3, rank_q4, rank_mean
+
+
 class MaskRCNN(pl.LightningModule):
     """Encapsulates the Mask RCNN model functionality.
     """
 
-    def __init__(self, config, options, detect=True, annotations_as_detections=False, profiler=PassThroughProfiler()):
+    def __init__(self,
+                 config,
+                 options,
+                 detect=True,
+                 annotations_as_detections=False,
+                 export_detections=False,
+                 evaluate_descriptors=False,
+                 profiler=PassThroughProfiler()):
         """
         config: A Sub-class of the Config class
         model_dir: Directory to save training logs and trained weights
@@ -1914,8 +2088,13 @@ class MaskRCNN(pl.LightningModule):
         self.image_log_rate = 100
         self.detect = detect
         self.annotations_as_detections = annotations_as_detections
+        self.export_detections = export_detections
+        self.evaluate_descriptors = evaluate_descriptors
         self.build()
         self.initialize_weights()
+
+        # used during descriptor evaluation to reject matches from neighboring frames
+        self.fps = 30
 
         self.profiler = profiler
 
@@ -1957,7 +2136,12 @@ class MaskRCNN(pl.LightningModule):
             self.range_conv = nn.Conv2d(3, 64, kernel_size=1, stride=1)
 
             ## FPN Classifier
-            self.classifier = Classifier(256, self.config.POOL_SIZE, self.config.IMAGE_SHAPE, self.config.NUM_CLASSES, self.config.NUM_PARAMETERS)
+            self.classifier = Classifier(256,
+                                         self.config.POOL_SIZE,
+                                         self.config.IMAGE_SHAPE,
+                                         self.config.NUM_CLASSES,
+                                         self.options.num_plane_ids,
+                                         self.config.DESC_LEN)
 
             ## FPN Mask
             self.mask = Mask(self.config, 256, self.config.MASK_POOL_SIZE, self.config.IMAGE_SHAPE, self.config.NUM_CLASSES)
@@ -1976,6 +2160,7 @@ class MaskRCNN(pl.LightningModule):
         self.dist_hist = HistRmsMetric(self.config.EVALUATION_BINS)
         self.norm_hist = HistRmsMetric(self.config.EVALUATION_BINS)
         self.target_dist_hist = HistMeanMetric(self.config.EVALUATION_BINS)
+        self.desc_ranks = DescRankMetric(self.config.DESC_LEN)
 
         ## Fix batch norm layers
         def set_bn_fix(m):
@@ -2024,7 +2209,9 @@ class MaskRCNN(pl.LightningModule):
             {'params': trainables_wo_bn, 'weight_decay': 0.0001},
             {'params': trainables_only_bn}], lr=self.options.LR)
 
-        return optimizer
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
     def initialize_weights(self):
         """Initialize model weights.
@@ -2140,6 +2327,7 @@ class MaskRCNN(pl.LightningModule):
 
         boxes = detections[:, :, 0:4].long()
         class_ids = detections[:, :, 4].long()
+        batch_descs = detections[:, :, 9:]
 
         ranges = utils.get_ranges_pad_torch_batch(camera)
 
@@ -2192,12 +2380,24 @@ class MaskRCNN(pl.LightningModule):
                 planes = torch.from_numpy(np.load(planes_filename)).type(tensor_type)
             next_id = planes.shape[0]
 
+            descs_filename = os.path.join(self.options.dataFolder,
+                                           'scenes',
+                                           batch['scene_id'][b],
+                                           output_dir,
+                                           'descs.npy')
+            descs = torch.zeros((0, self.config.DESC_LEN), device=dev)
+            if os.path.exists(descs_filename):
+                descs = torch.from_numpy(np.load(descs_filename)).type(tensor_type)
+            if next_id != descs.shape[0]:
+                raise 'Number of descriptors not equal to the number of planes'
+
             T_c_w = batch['left']['extrinsics'][b]
             T_w_c_inv_t = T_c_w.transpose(0, 1)
             full_masks = []
             areas = []
             plane_eqs = []
             plane_eqs_c = []
+            cur_descs = []
             for n in range(nsize):
                 if class_ids[b, n] > 0:
                     full_mask = utils.resize_mask_full(self.config, boxes[b, n, :], masks[b, n, class_ids[b, n], :, :])
@@ -2235,6 +2435,7 @@ class MaskRCNN(pl.LightningModule):
                         areas.append(area)
                         plane_eqs.append(plane_eq_w)
                         plane_eqs_c.append(plane)
+                        cur_descs.append(batch_descs[b, n, :])
 
             # sort in descending order, bigger planes have priority
             order = sorted([(area, idx) for idx, area in enumerate(areas)], key=lambda plane: -plane[0])
@@ -2252,11 +2453,14 @@ class MaskRCNN(pl.LightningModule):
                 segmentation = torch.minimum(segmentation, cur_segmentation)
                 planes = torch.cat([planes, plane_eqs[idx].view(1, 4)], dim=0)
                 planes_c = torch.cat([planes_c, plane_eqs_c[idx].view(1, 3)], dim=0)
+                descs = torch.cat([descs, cur_descs[idx].view(1, self.config.DESC_LEN)], dim=0)
 
                 next_id += 1
             segmentation[segmentation == max_val] = -1
 
             np.save(planes_filename, planes.cpu().numpy())
+
+            np.save(descs_filename, descs.cpu().numpy())
 
             # segmentation = (segmentation[:, :, 2] * 256 * 256 +
             #                 segmentation[:, :, 1] * 256 +
@@ -2532,7 +2736,8 @@ class MaskRCNN(pl.LightningModule):
         image_metas = batch['left']['image_metas']
         rpn_match = batch['left']['rpn_match']
         rpn_bbox = batch['left']['rpn_bbox']
-        gt_class_ids = batch['left']['gt_class_ids']
+        gt_class_ids = batch['left']['gt_class_ids'] % self.config.NUM_CLASSES
+        gt_plane_ids = batch['left']['gt_class_ids'] // self.config.NUM_CLASSES
         gt_boxes = batch['left']['gt_boxes']
         gt_masks = batch['left']['gt_masks']
         gt_parameters = batch['left']['gt_parameters']
@@ -2582,17 +2787,27 @@ class MaskRCNN(pl.LightningModule):
             ## Subsamples proposals and generates target outputs for training
             ## Note that proposal class IDs, gt_boxes, and gt_masks are zero
             ## padded. Equally, returned rois and targets are zero padded.
-            rois, target_class_ids, target_deltas, target_mask, target_parameters, target_plane_params = \
-                detection_target_layer(rpn_rois, gt_class_ids, gt_boxes_norm, gt_masks, gt_parameters, self.config,
+            rois, target_class_ids, target_deltas, target_mask, target_plane_params, target_plane_ids = \
+                detection_target_layer(rpn_rois,
+                                       gt_class_ids,
+                                       gt_plane_ids,
+                                       gt_boxes_norm,
+                                       gt_masks,
+                                       gt_parameters,
+                                       self.config,
                                        camera)
 
             ## Network Heads
             ## Proposal classifier and BBox regressor heads
             # print([maps.shape for maps in mrcnn_feature_maps], target_parameters.shape)
-            mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_parameters = self.classifier(mrcnn_feature_maps,
-                                                                                            rois,
-                                                                                            ranges_feat,
-                                                                                            pool_features=False)
+            [mrcnn_class_logits,
+             mrcnn_class,
+             mrcnn_bbox,
+             mrcnn_plane_id_desc,
+             mrcnn_plane_id_logits] = self.classifier(mrcnn_feature_maps,
+                                                     rois,
+                                                     ranges_feat,
+                                                     pool_features=False)
 
             ## Create masks for detections
             mrcnn_mask, _ = self.mask(mrcnn_feature_maps, rois)
@@ -2610,30 +2825,31 @@ class MaskRCNN(pl.LightningModule):
              mrcnn_class_loss,
              mrcnn_bbox_loss,
              mrcnn_mask_loss,
-             mrcnn_parameter_loss,
-             mrcnn_plane_params_loss] = compute_losses(self.config, camera,
-                                                  rpn_match, rpn_bbox,
-                                                  rpn_class_logits, rpn_pred_bbox,
-                                                  target_class_ids, mrcnn_class_logits,
-                                                  target_deltas, mrcnn_bbox,
-                                                  target_mask, mrcnn_mask,
-                                                  target_parameters, mrcnn_parameters,
-                                                  target_plane_params, mrcnn_plane_params)
+             mrcnn_plane_params_loss,
+             mrcnn_plane_ids_loss] = compute_losses(self.config, camera,
+                                                       rpn_match, rpn_bbox,
+                                                       rpn_class_logits, rpn_pred_bbox,
+                                                       target_class_ids, mrcnn_class_logits,
+                                                       target_deltas, mrcnn_bbox,
+                                                       target_mask, mrcnn_mask,
+                                                       target_plane_params, mrcnn_plane_params,
+                                                       target_plane_ids, mrcnn_plane_id_logits)
 
             maskrcnn_loss = rpn_class_loss + \
                             rpn_bbox_loss + \
                             mrcnn_class_loss + \
                             mrcnn_bbox_loss + \
                             mrcnn_mask_loss + \
-                            mrcnn_plane_params_loss
+                            mrcnn_plane_params_loss + \
+                            mrcnn_plane_ids_loss
 
             self.log('train/rpn_class_loss', rpn_class_loss.cpu().detach())
             self.log('train/rpn_bbox_loss', rpn_bbox_loss.cpu().detach())
             self.log('train/mrcnn_class_loss', mrcnn_class_loss.cpu().detach())
             self.log('train/mrcnn_bbox_loss', mrcnn_bbox_loss.cpu().detach())
             self.log('train/mrcnn_mask_loss', mrcnn_mask_loss.cpu().detach())
-            self.log('train/mrcnn_parameter_loss', mrcnn_parameter_loss.cpu().detach())
             self.log('train/mrcnn_plane_params_loss', mrcnn_plane_params_loss.cpu().detach())
+            self.log('train/mrcnn_plane_ids_loss', mrcnn_plane_ids_loss.cpu().detach())
         else:
             maskrcnn_loss = torch.zeros(1, device=dev, dtype=dtype)
         # losses += [rpn_class_loss + rpn_bbox_loss + \
@@ -2682,7 +2898,7 @@ class MaskRCNN(pl.LightningModule):
         return loss
 
     def unmold_detections(self, camera, detections, detection_masks, detection_plane_params, depth_np, normals_np,
-                          detection_gt_params=None, gt_depth=None):
+                          images=None):
         """Reformats the detections of one image from the format of the neural
         network output to a format suitable for use in the rest of the
         application.
@@ -2726,6 +2942,21 @@ class MaskRCNN(pl.LightningModule):
         num_detections = final_masks.shape[0]
 
         masks = final_masks
+
+        # # TODO Just for testing HSV descriptors
+        # if images is not None:
+        #     images_hsv = utils.rgb2hsv(images.unsqueeze(0))
+        #     for n in range(num_detections):
+        #         cur_mask_det = masks[n, :, :, :] > 0.5
+        #         cur_mask_valid = depth_np > 0.2
+        #         cur_mask = torch.logical_and(cur_mask_det, cur_mask_valid)
+        #         cur_area = cur_mask.sum()
+        #
+        #         cur_colors = images_hsv[0, :, cur_mask.squeeze(0)]
+        #         hist_h = torch.histc(cur_colors[0, :], min=0, max=360, bins=32) / cur_area
+        #         hist_s = torch.histc(cur_colors[0, :], min=0, max=256, bins=32) / cur_area
+        #
+        #         detections[n, 9:9 + 64] = torch.cat([hist_h, hist_s])
 
         if self.config.ANCHOR_TYPE == 'none_exp_plane_params':
             ranges = utils.get_ranges_pad_torch(camera)
@@ -2865,7 +3096,8 @@ class MaskRCNN(pl.LightningModule):
         image_metas = batch['left']['image_metas']
         rpn_match = batch['left']['rpn_match']
         rpn_bbox = batch['left']['rpn_bbox']
-        gt_class_ids = batch['left']['gt_class_ids']
+        gt_class_ids = batch['left']['gt_class_ids'] % self.config.NUM_CLASSES
+        gt_plane_ids = batch['left']['gt_class_ids'] // self.config.NUM_CLASSES
         gt_boxes = batch['left']['gt_boxes']
         gt_masks = batch['left']['gt_masks']
         gt_parameters = batch['left']['gt_parameters']
@@ -2919,17 +3151,21 @@ class MaskRCNN(pl.LightningModule):
             if self.annotations_as_detections:
                 ## Network Heads
                 ## Proposal classifier and BBox regressor heads
-                mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_parameters = self.classifier(mrcnn_feature_maps,
-                                                                                                gt_boxes_norm,
-                                                                                                ranges_feat,
-                                                                                                pool_features=False)
+                [mrcnn_class_logits,
+                 mrcnn_class,
+                 mrcnn_bbox,
+                 mrcnn_plane_id_desc,
+                 mrcnn_plane_id_logits] = self.classifier(mrcnn_feature_maps,
+                                                          gt_boxes_norm,
+                                                          ranges_feat,
+                                                          pool_features=False)
 
                 nsize = mrcnn_class.shape[1]
                 csize = mrcnn_class.shape[2]
 
                 # gt_class = torch.zeros_like(mrcnn_class)
-                idxs = torch.arange(bsize * nsize, dtype=torch.long, device=dev)
-                idxs_class = gt_class_ids.view(bsize * nsize).long()
+                # idxs = torch.arange(bsize * nsize, dtype=torch.long, device=dev)
+                # idxs_class = gt_class_ids.view(bsize * nsize).long()
 
                 # gt_class = gt_class.view(bsize * nsize, csize)
                 # gt_class[idxs, idxs_class] = 1.0
@@ -2937,32 +3173,37 @@ class MaskRCNN(pl.LightningModule):
 
                 # class_parameters = torch.zeros(bsize, nsize, self.config.NUM_PARAMETERS, device=dev)
                 # class_parameters = class_parameters.view(bsize * nsize, self.config.NUM_PARAMETERS)
-                class_parameters = mrcnn_parameters.view(bsize * nsize, csize, self.config.NUM_PARAMETERS)[idxs, idxs_class, :]
+                # class_parameters = mrcnn_parameters.view(bsize * nsize, csize, self.config.NUM_PARAMETERS)[idxs, idxs_class, :]
                 # class_parameters = self.config.applyAnchorsTensor(idxs_class, class_parameters)
-                class_parameters = class_parameters.view(bsize, nsize, self.config.NUM_PARAMETERS)
+                # class_parameters = class_parameters.view(bsize, nsize, self.config.NUM_PARAMETERS)
 
                 ## Detections
-                ## output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in image coordinates
+                ## output is [batch, num_detections, (y1, x1, y2, x2, class_id, score, plane params, desc)] in image coordinates
                 molded_detections = torch.cat([gt_boxes,
                                                gt_class_ids.float().unsqueeze(-1),
                                                torch.ones_like(gt_class_ids.float().unsqueeze(-1)),
-                                               class_parameters],
+                                               torch.zeros(bsize, nsize, self.config.NUM_PARAMETERS, device=dev),
+                                               mrcnn_plane_id_desc],
                                               dim=-1)
             else:
                 ## Network Heads
                 ## Proposal classifier and BBox regressor heads
-                mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_parameters = self.classifier(mrcnn_feature_maps,
-                                                                                                rpn_rois,
-                                                                                                ranges_feat,
-                                                                                                pool_features=False)
+                [mrcnn_class_logits,
+                 mrcnn_class,
+                 mrcnn_bbox,
+                 mrcnn_plane_id_desc,
+                 mrcnn_plane_id_logits] = self.classifier(mrcnn_feature_maps,
+                                                          rpn_rois,
+                                                          ranges_feat,
+                                                          pool_features=False)
 
                 ## Detections
-                ## output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in image coordinates
+                ## output is [batch, num_detections, (y1, x1, y2, x2, class_id, score, plane params, desc)] in image coordinates
                 molded_detections = detection_layer(self.config,
                                                     rpn_rois,
                                                     mrcnn_class,
                                                     mrcnn_bbox,
-                                                    mrcnn_parameters,
+                                                    mrcnn_plane_id_desc,
                                                     image_metas,
                                                     use_nms=use_nms)
 
@@ -3023,13 +3264,15 @@ class MaskRCNN(pl.LightningModule):
                                                         mrcnn_mask[b, :, :, :, :],
                                                         detection_plane_params[b, :, :],
                                                         depth_np[b, :, :, :],
-                                                        normal_np[b, :, :, :])
+                                                        normal_np[b, :, :, :],
+                                                        images=images_l[b, :, :, :])
                 detections[b, :, :] = cur_detections
                 # detection_masks[b, :, :, :] = cur_detection_masks
         else:
             detections = torch.zeros((bsize,
                                       self.config.DETECTION_MAX_INSTANCES,
-                                      4 + 2 + self.config.NUM_PARAMETERS), device=dev, dtype=dtype)
+                                      4 + 2 + self.config.NUM_PARAMETERS + self.config.DESC_LEN),
+                                     device=dev, dtype=dtype)
             mrcnn_mask = torch.zeros((bsize,
                                       self.config.DETECTION_MAX_INSTANCES,
                                       self.config.NUM_CLASSES,
@@ -3101,7 +3344,8 @@ class MaskRCNN(pl.LightningModule):
         image_metas = batch['left']['image_metas']
         rpn_match = batch['left']['rpn_match']
         rpn_bbox = batch['left']['rpn_bbox']
-        gt_class_ids = batch['left']['gt_class_ids']
+        gt_class_ids = batch['left']['gt_class_ids'] % self.config.NUM_CLASSES
+        gt_plane_ids = batch['left']['gt_class_ids'] // self.config.NUM_CLASSES
         gt_boxes = batch['left']['gt_boxes']
         gt_masks = batch['left']['gt_masks']
         gt_parameters = batch['left']['gt_parameters']
@@ -3110,6 +3354,10 @@ class MaskRCNN(pl.LightningModule):
 
         images_r = batch['right']['image']
         molded_images_r = utils.mold_image_torch(images_r, self.config)
+
+        bsize = molded_images_l.shape[0]
+
+        tensor_type = molded_images_l.type()
 
         with self.profiler.profile('detection'):
             detections, masks, disp_np, disp_stddev, depth_np, normal_np = self.detection_step(batch, batch_idx)
@@ -3128,19 +3376,20 @@ class MaskRCNN(pl.LightningModule):
                                                             batch=batch,
                                                             profiler=self.profiler)
 
-        # self.save_as_annotation(batch,
-        #                         batch_idx,
-        #                         camera,
-        #                         detections,
-        #                         masks,
-        #                         gt_depth,
-        #                         depth_np,
-        #                         disp_stddev,
-        #                         from_target=False,
-        #                         save_depth=True,
-        #                         save_det=True,
-        #                         output_dir='annotation_plane_params_det')
-        #
+        if self.export_detections:
+            self.save_as_annotation(batch,
+                                    batch_idx,
+                                    camera,
+                                    detections,
+                                    masks,
+                                    gt_depth,
+                                    depth_np,
+                                    disp_stddev,
+                                    from_target=False,
+                                    save_depth=True,
+                                    save_det=True,
+                                    output_dir='annotation_plane_params_det')
+
         # if batch_idx % self.image_log_rate == 0:
         #     dist_error = (error_dist_hist.sum() / error_area_hist.sum().clamp(min=1.0)).sqrt()
         #     norm_error = (error_norm_hist.sum() / error_area_hist.sum().clamp(min=1.0)).sqrt()
@@ -3151,9 +3400,40 @@ class MaskRCNN(pl.LightningModule):
         #                                             batch['scene_id'],
         #                                             batch['frame_num']))
 
-        self.dist_hist(error_dist_hist, error_area_hist, error_cnt_hist)
-        self.norm_hist(error_norm_hist, error_area_hist, error_cnt_hist)
-        self.target_dist_hist(target_dist_hist, error_area_hist, error_cnt_hist)
+        if self.evaluate_descriptors:
+            self.dist_hist(error_dist_hist, error_area_hist, error_cnt_hist)
+            self.norm_hist(error_norm_hist, error_area_hist, error_cnt_hist)
+            self.target_dist_hist(target_dist_hist, error_area_hist, error_cnt_hist)
+
+            det_plane_ids, det_mask_areas = utils.find_plane_ids(self.config,
+                                                                 detections[:, :, 0:4],
+                                                                 masks,
+                                                                 detections[:, :, 4],
+                                                                 gt_boxes,
+                                                                 gt_masks,
+                                                                 gt_class_ids,
+                                                                 gt_plane_ids)
+
+            valid_idxs = det_plane_ids >= 0
+
+            frame_nums = torch.from_numpy(np.asarray(batch['frame_num']).astype(np.float32)).type(tensor_type)
+            frame_nums = frame_nums.view(bsize, 1).expand(-1, det_plane_ids.shape[1])
+            # timestamps
+            tss = frame_nums / self.fps
+            cat_idxs = torch.minimum((det_mask_areas.sqrt() / 50).long(),
+                                     torch.tensor(5, dtype=torch.long, device=det_mask_areas.device))
+
+            scene_ids = batch['scene_id']
+            scene_ids_valid = []
+            for b in range(bsize):
+                n_valid_batch = valid_idxs[b, :].sum()
+                scene_ids_valid.extend([scene_ids[b]] * int(n_valid_batch))
+
+            self.desc_ranks(det_plane_ids[valid_idxs],
+                            detections[valid_idxs, :][:, 9:],
+                            tss[valid_idxs],
+                            cat_idxs[valid_idxs],
+                            scene_ids_valid)
 
     def validation_step(self, batch, batch_idx):
         self.validation_step_common(batch, batch_idx)
@@ -3174,9 +3454,12 @@ class MaskRCNN(pl.LightningModule):
          _,
          target_dist_val] = self.target_dist_hist.compute()
 
+        rank_q0, rank_q1, rank_q2, rank_q3, rank_q4, rank_mean = self.desc_ranks.compute()
+
         self.dist_hist.reset()
         self.norm_hist.reset()
         self.target_dist_hist.reset()
+        self.desc_ranks.reset()
 
         self.log('val/mean_error_dist', error_dist_val.cpu().detach())
         self.log('val/mean_error_norm', error_norm_val.cpu().detach())
@@ -3192,6 +3475,14 @@ class MaskRCNN(pl.LightningModule):
             self.log('val/error area %02d' % b, error_hist_area[b].cpu().detach())
         for b in range(target_dist_hist_val.shape[0]):
             self.log('val/hist_target_dist %02d' % b, target_dist_hist_val[b].cpu().detach())
+
+        for b in range(rank_q0.shape[0]):
+            self.log('val/rank_q0 %02d' % b, rank_q0[b].cpu().detach())
+            self.log('val/rank_q1 %02d' % b, rank_q1[b].cpu().detach())
+            self.log('val/rank_q2 %02d' % b, rank_q2[b].cpu().detach())
+            self.log('val/rank_q3 %02d' % b, rank_q3[b].cpu().detach())
+            self.log('val/rank_q4 %02d' % b, rank_q4[b].cpu().detach())
+            self.log('val/rank_mean %02d' % b, rank_mean[b].cpu().detach())
 
     def test_step(self, batch, batch_idx):
         self.validation_step_common(batch, batch_idx)
@@ -3212,9 +3503,12 @@ class MaskRCNN(pl.LightningModule):
          _,
          target_dist_val] = self.target_dist_hist.compute()
 
+        rank_q0, rank_q1, rank_q2, rank_q3, rank_q4, rank_mean = self.desc_ranks.compute()
+
         self.dist_hist.reset()
         self.norm_hist.reset()
         self.target_dist_hist.reset()
+        self.desc_ranks.reset()
 
         self.log('val/mean_error_dist', error_dist_val.cpu().detach())
         self.log('val/mean_error_norm', error_norm_val.cpu().detach())
@@ -3230,6 +3524,14 @@ class MaskRCNN(pl.LightningModule):
             self.log('val/error area %02d' % b, error_hist_area[b].cpu().detach())
         for b in range(target_dist_hist_val.shape[0]):
             self.log('val/hist_target_dist %02d' % b, target_dist_hist_val[b].cpu().detach())
+
+        for b in range(rank_q0.shape[0]):
+            self.log('val/rank_q0 %02d' % b, rank_q0[b].cpu().detach())
+            self.log('val/rank_q1 %02d' % b, rank_q1[b].cpu().detach())
+            self.log('val/rank_q2 %02d' % b, rank_q2[b].cpu().detach())
+            self.log('val/rank_q3 %02d' % b, rank_q3[b].cpu().detach())
+            self.log('val/rank_q4 %02d' % b, rank_q4[b].cpu().detach())
+            self.log('val/rank_mean %02d' % b, rank_mean[b].cpu().detach())
 
         dist_hist_str = ''
         dist_hist_min_str = ''
@@ -3258,6 +3560,25 @@ class MaskRCNN(pl.LightningModule):
         for b in range(error_hist_area.shape[0]):
             area_str += str(int(error_hist_area[b])) + ' '
 
+        rank_mean_str = ''
+        for b in range(rank_mean.shape[0]):
+            rank_mean_str += '%.3f' % rank_mean[b] + ' '
+        rank_q0_str = ''
+        for b in range(rank_q0.shape[0]):
+            rank_q0_str += str(int(rank_q0[b])) + ' '
+        rank_q1_str = ''
+        for b in range(rank_q1.shape[0]):
+            rank_q1_str += str(int(rank_q1[b])) + ' '
+        rank_q2_str = ''
+        for b in range(rank_q2.shape[0]):
+            rank_q2_str += str(int(rank_q2[b])) + ' '
+        rank_q3_str = ''
+        for b in range(rank_q3.shape[0]):
+            rank_q3_str += str(int(rank_q3[b])) + ' '
+        rank_q4_str = ''
+        for b in range(rank_q4.shape[0]):
+            rank_q4_str += str(int(rank_q4[b])) + ' '
+
         print('%.3f ' % float(error_dist_val))
         print(dist_hist_str)
         print(dist_hist_min_str)
@@ -3270,3 +3591,9 @@ class MaskRCNN(pl.LightningModule):
         print(area_str)
         print('%.3f ' % float(target_dist_val))
         print(target_dist_hist_str)
+        print(rank_mean_str)
+        print(rank_q0_str)
+        print(rank_q1_str)
+        print(rank_q2_str)
+        print(rank_q3_str)
+        print(rank_q4_str)

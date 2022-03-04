@@ -256,9 +256,20 @@ class ScenenetRgbdDataset(ScenenetRgbdDatasetSingle):
         for idx, info in enumerate([info_1, info_2]):
 
             if self.load_scores:
-                image, planes, segmentation, depth, normal, camera, extrinsics, semantics, scores_a, planes_a, masks_a = info
+                [image,
+                 planes,
+                 segmentation,
+                 depth,
+                 normal,
+                 camera,
+                 extrinsics,
+                 semantics,
+                 plane_info,
+                 scores_a,
+                 planes_a,
+                 masks_a] = info
             else:
-                image, planes, segmentation, depth, normal, camera, extrinsics, semantics = info
+                image, planes, segmentation, depth, normal, camera, extrinsics, semantics, plane_info = info
 
             image = cv2.resize(image, (depth.shape[1], depth.shape[0]))
 
@@ -272,7 +283,8 @@ class ScenenetRgbdDataset(ScenenetRgbdDatasetSingle):
                     continue
                 instance_masks.append(m)
                 if self.config.ANCHOR_TYPE == 'none' or 'none_exp_' in self.config.ANCHOR_TYPE:
-                    class_ids.append(1)
+                    # encode class, so % 2 gives class and / 2 gives plane_id
+                    class_ids.append(1 + 2 * self.scene_id_sc_plane_to_plane_id[(scene.get_scene_id_sc(), plane_info[planeIndex])])
                     parameters.append(np.concatenate([plane, np.zeros(1)], axis=0))
 
             if len(instance_masks) > 0:
@@ -294,6 +306,7 @@ class ScenenetRgbdDataset(ScenenetRgbdDatasetSingle):
             extrinsics = extrinsics.astype(np.float32)
             planes = planes.astype(np.float32)
             segmentation = segmentation[:, :, None]
+            plane_info = plane_info.astype(np.int32)
 
             data_pair[self.camera_names[idx]] = {'image': image,
                                                  'gt_class_ids': gt_class_ids,
@@ -302,6 +315,7 @@ class ScenenetRgbdDataset(ScenenetRgbdDatasetSingle):
                                                  'depth': depth,
                                                  'extrinsics': extrinsics,
                                                  'planes': planes,
+                                                 'plane_info': plane_info,
                                                  'segmentation': segmentation,
                                                  }
 
@@ -370,7 +384,7 @@ class ScenenetRgbdDataset(ScenenetRgbdDatasetSingle):
             gt_boxes = utils.pad_zeros_torch(torch.from_numpy(gt_boxes).float(), self.config.MAX_GT_INSTANCES)
             gt_masks = utils.pad_zeros_torch(torch.from_numpy(gt_masks.astype(np.float32).transpose(2, 0, 1)),
                                              self.config.MAX_GT_INSTANCES)
-            planes = utils.pad_zeros_torch(torch.from_numpy(data_pair[cam]['planes']), self.config.MAX_GT_INSTANCES)
+            # planes = utils.pad_zeros_torch(torch.from_numpy(data_pair[cam]['planes']), self.config.MAX_GT_INSTANCES)
             plane_indices = utils.pad_zeros_torch(torch.from_numpy(gt_parameters[:, -1]).long(),
                                                   self.config.MAX_GT_INSTANCES)
             gt_parameters = utils.pad_zeros_torch(torch.from_numpy(gt_parameters[:, :-1]).float(),
@@ -388,7 +402,7 @@ class ScenenetRgbdDataset(ScenenetRgbdDatasetSingle):
             data_pair[cam]['gt_parameters'] = gt_parameters
             data_pair[cam]['depth'] = depth
             data_pair[cam]['extrinsics'] = extrinsics
-            data_pair[cam]['planes'] = planes
+            # data_pair[cam]['planes'] = planes
             data_pair[cam]['segmentation'] = segmentation
             data_pair[cam]['plane_indices'] = plane_indices
 

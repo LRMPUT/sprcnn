@@ -12,6 +12,9 @@ import math
 import random
 import numpy as np
 import cv2
+
+import utils
+
 cv2.setNumThreads(0)
 import torch
 import torch.nn.functional as F
@@ -443,7 +446,7 @@ class ColorPalette:
         else:
             return self.colorMap[index]
         pass
-    
+
 
 def writePointCloud(filename, point_cloud):
     with open(filename, 'w') as f:
@@ -481,7 +484,7 @@ def calcPlaneDepths(planes, width, height, camera, max_depth=20):
     urange = (np.arange(width, dtype=np.float32).reshape(1, -1).repeat(height, 0) / (width + 1) * (camera[4] + 1) - camera[2]) / camera[0]
     vrange = (np.arange(height, dtype=np.float32).reshape(-1, 1).repeat(width, 1) / (height + 1) * (camera[5] + 1) - camera[3]) / camera[1]
     ranges = np.stack([urange, vrange, np.ones(urange.shape)], axis=-1)
-    
+
     planeOffsets = np.linalg.norm(planes, axis=-1, keepdims=True)
     planeNormals = planes / np.maximum(planeOffsets, 1e-4)
 
@@ -1065,7 +1068,7 @@ def cleanSegmentation(image,
                       return_plane_depths=False):
 
     planeDepths = calcPlaneDepths(planes, segmentation.shape[1], segmentation.shape[0], camera).transpose((2, 0, 1))
-    
+
     newSegmentation = np.full(segmentation.shape, fill_value=-1)
     validMask = np.logical_and(np.linalg.norm(image, axis=-1) > brightThreshold, depth > 1e-4)
     depthDiffMask = np.logical_or(np.abs(planeDepths - depth) < depthDiffThreshold, depth < 1e-4)
@@ -1710,3 +1713,75 @@ def evaluate_plane_dist_norm(config, camera, detections, masks, depth_gt, max_bi
                     #     # cur_errors_dist_comp = point_to_plane_depth_diff(plane_pred, XYZ_plane_gt).abs()
 
     return [error_dist_hist, error_norm_hist, error_area_hist, error_cnt_hist, target_dist_hist]
+
+
+def find_plane_ids(config,
+                   det_rois,
+                   det_masks,
+                   det_class_ids,
+                   gt_boxes,
+                   gt_masks,
+                   gt_class_ids,
+                   gt_plane_ids):
+    bsize = det_masks.shape[0]
+    nsize = det_masks.shape[1]
+
+    dev = det_masks.device
+    dtype = det_masks.dtype
+
+    det_plane_ids = -1 * torch.ones((bsize, nsize), dtype=torch.int32, device=dev)
+    det_mask_areas = torch.zeros((bsize, nsize), dtype=dtype, device=dev)
+    for b in range(bsize):
+        nsize_gt = (gt_class_ids[b, :] > 0).sum()
+
+        if nsize_gt > 0:
+            gt_masks_full = torch.zeros((nsize_gt,
+                                         config.IMAGE_MAX_DIM,
+                                         config.IMAGE_MAX_DIM),
+                                        dtype=dtype, device=dev)
+
+            for n in range(nsize_gt):
+                if gt_class_ids[b, n] > 0:
+                    gt_masks_full[n, :, :] = utils.resize_mask_full(config, gt_boxes[b, n, :].long(), gt_masks[b, n, :, :])
+
+            for n in range(nsize):
+                class_id = det_class_ids[b, n].long()
+                if class_id > 0:
+                    cur_det_mask = torch.where(det_masks[b, n, class_id, :, :] > 0.5,
+                                               torch.tensor([1.0], dtype=dtype, device=dev),
+                                               torch.tensor([0.0], dtype=dtype, device=dev))
+                    cur_det_mask_full = utils.resize_mask_full(config,
+                                                               det_rois[b, n, :].long(),
+                                                               cur_det_mask)
+                    mask_area = cur_det_mask_full.sum()
+                    det_mask_areas[b, n] = mask_area
+
+                    mask_intersection = cur_det_mask_full.expand(nsize_gt, -1, -1) * gt_masks_full
+                    mask_int_area = mask_intersection.sum(dim=(-2, -1))
+                    best_idx = torch.argmax(mask_int_area)
+                    if mask_int_area[best_idx] / mask_area.clamp(min=1.0) > 0.5:
+                        det_plane_ids[b, n] = gt_plane_ids[b, best_idx]
+
+    return det_plane_ids, det_mask_areas
+
+
+def rgb2hsv(input, epsilon=1e-10):
+    assert(input.shape[1] == 3)
+
+    input = input / 255.0
+
+    r, g, b = input[:, 0], input[:, 1], input[:, 2]
+    max_rgb, argmax_rgb = input.max(1)
+    min_rgb, argmin_rgb = input.min(1)
+
+    max_min = max_rgb - min_rgb + epsilon
+
+    h1 = 60.0 * (g - r) / max_min + 60.0
+    h2 = 60.0 * (b - g) / max_min + 180.0
+    h3 = 60.0 * (r - b) / max_min + 300.0
+
+    h = torch.stack((h2, h3, h1), dim=0).gather(dim=0, index=argmin_rgb.unsqueeze(0)).squeeze(0)
+    s = max_min / (max_rgb + epsilon) * 255.0
+    v = max_rgb * 255.0
+
+    return torch.stack((h, s, v), dim=1)

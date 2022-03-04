@@ -95,18 +95,23 @@ class ScenenetRgbdScene():
 
         if self.load_annotation:
             self.planes = np.load(scenePath + '/' + self.annotation_dir + '/planes.npy')
+            self.plane_ids = np.arange(self.planes.shape[0], dtype=np.int)
 
-            # self.plane_info = np.load(scenePath + '/annotation/plane_info.npy', allow_pickle=True)
-            # if len(self.plane_info) != len(self.planes):
-            #     print('invalid number of plane info', scenePath + '/annotation/planes.npy',
-            #           scenePath + '/annotation/plane_info.npy', len(self.plane_info), len(self.planes))
-            #     exit(1)
+            merge_file = os.path.join(scenePath, self.annotation_dir, 'merge.txt')
+            if os.path.exists(merge_file):
+                self.plane_ids = np.loadtxt(merge_file, dtype=np.int)
         else:
             self.planes = np.zeros((0, 4))
-            # self.plane_info = []
+            self.plane_ids = -1 * np.ones(0, dtype=np.int)
 
         self.scenePath = scenePath
         return
+
+    def get_scene_id_sc(self):
+        return '_'.join(self.scene_id.split('_')[:-1])
+
+    def get_unique_plane_ids(self):
+        return np.unique(self.plane_ids)
 
     def transformPlanes(self, transformation, planes):
         if planes.shape[1] == 3:
@@ -141,7 +146,7 @@ class ScenenetRgbdScene():
         segmentList = sorted(segmentList, key=lambda x: -x[1])
 
         newPlanes = []
-        # newPlaneInfo = []
+        newPlaneInfo = []
         newSegmentation = np.full(segmentation.shape, fill_value=-1, dtype=np.int32)
 
         newIndex = 0
@@ -156,11 +161,11 @@ class ScenenetRgbdScene():
                     continue
                 newPlanes.append(self.planes[old_id])
                 newSegmentation[boxy_segm == new_id] = newIndex
-                # newPlaneInfo.append(self.plane_info[old_id] + [old_id])
+                newPlaneInfo.append(old_id)
                 newIndex += 1
                 continue
 
-        return newSegmentation, newPlanes
+        return newSegmentation, newPlanes, newPlaneInfo
 
     def __len__(self):
         return len(self.frame_nums)
@@ -217,11 +222,13 @@ class ScenenetRgbdScene():
                             segmentation[:, :, 1] * 256 +
                             segmentation[:, :, 0]) // 100 - 1
 
-            newSegmentation, newPlanes = self.makeBoxySegmentation(segmentation)
+            newSegmentation, newPlanes, newPlaneInfo = self.makeBoxySegmentation(segmentation)
 
             segmentation = newSegmentation
             planes_global = np.array(newPlanes)
-            # plane_info = newPlaneInfo
+            plane_info = np.array(newPlaneInfo, dtype=np.int32)
+            # convert to merged plane ids
+            plane_info = self.plane_ids[plane_info]
 
             image = cv2.resize(image, (depth.shape[1], depth.shape[0]))
 
@@ -259,17 +266,18 @@ class ScenenetRgbdScene():
 
                     print('depth error', depth_error)
                     planes = np.zeros((0, 3), dtype=np.float32)
+                    plane_info = np.zeros(0, dtype=np.float32)
 
             # if len(planes) == 0 or segmentation.max() < 0:
             #     raise Exception('No planes on the view')
         else:
             planes = np.zeros((0, 3), dtype=np.float32)
-            # plane_info = []
+            plane_info = np.zeros(0, dtype=np.float32)
             segmentation = -1 * np.ones((depth.shape[0], depth.shape[1]), dtype=np.int32)
 
         semantics = np.zeros_like(depth)
 
-        info = [image, planes, segmentation, depth, normal, self.camera, extrinsics, semantics]
+        info = [image, planes, segmentation, depth, normal, self.camera, extrinsics, semantics, plane_info]
 
         if self.load_scores:
             anchor_data = np.load(scoresPath)

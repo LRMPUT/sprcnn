@@ -19,7 +19,7 @@ def eval(options):
                                            config,
                                            split='test',
                                            random=False,
-                                           load_annotation=True,
+                                           load_annotation=options.use_annotations,
                                            load_normals=False,
                                            filter_depth=False,
                                            annotation_dir=options.annotation_dir,
@@ -29,7 +29,7 @@ def eval(options):
                                            config,
                                            split='test',
                                            random=False,
-                                           load_annotation=True,
+                                           load_annotation=options.use_annotations,
                                            load_normals=True,
                                            filter_depth=True,
                                            annotation_dir=options.annotation_dir,
@@ -37,13 +37,16 @@ def eval(options):
 
     test_loader = DataLoader(dataset_test, batch_size=1, shuffle=False, num_workers=4)
 
+    options.num_plane_ids = 33985
     # profiler = AdvancedProfiler()
     profiler = PassThroughProfiler()
     # model = MaskRCNN(config, options)
     model = MaskRCNN.load_from_checkpoint(options.checkpoint,
                                           config=config,
                                           options=options,
-                                          annotations_as_detections=True,
+                                          annotations_as_detections=options.use_annotations,
+                                          export_detections=options.export_detections,
+                                          evaluate_descriptors=options.evaluate_descriptors,
                                           profiler=profiler)
     trainer = pl.Trainer(gpus=1, profiler=profiler)
 

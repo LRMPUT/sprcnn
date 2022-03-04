@@ -199,6 +199,8 @@ class Config(object):
         # self.BASELINE = 0.2
         self.UVD_CONST = 320
 
+        self.DESC_LEN = 64
+
         self.BILINEAR_UPSAMPLING = 'bilinear' in options.suffix
         self.FITTING_TYPE = 0
 

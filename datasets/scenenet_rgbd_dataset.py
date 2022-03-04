@@ -45,7 +45,10 @@ class ScenenetRgbdDatasetSingle(Dataset):
         self.scenes = []
         self.sceneImageIndices = []
 
+        self.scene_id_sc_plane_to_plane_id = {}
+
         scene_id_to_idx = {}
+        next_plane_id = 0
         with open(os.path.join(self.dataFolder, split + '.txt')) as f:
             for line in f:
                 line_split = line.split()
@@ -64,10 +67,19 @@ class ScenenetRgbdDatasetSingle(Dataset):
                                               annotation_dir=annotation_dir,
                                               writer=self.writer)
                     self.scenes.append(scene)
+
                     scene_id_to_idx[scene_id] = len(self.scenes) - 1
 
+                    scene_id_sc = scene.get_scene_id_sc()
+                    # assign each pair of scene_id, scene_plane_id a global plane_id
+                    for idx, plane in enumerate(scene.planes):
+                        if np.linalg.norm(plane[0:3]) > 1.0e-4:
+                            if (scene_id_sc, scene.plane_ids[idx]) not in self.scene_id_sc_plane_to_plane_id:
+                                self.scene_id_sc_plane_to_plane_id[(scene_id_sc, scene.plane_ids[idx])] = next_plane_id
+                                next_plane_id += 1
+
                 self.sceneImageIndices += [[scene_id_to_idx[scene_id], frame_num]]
-        
+
         if random:
             t = int(time.time() * 1000000)
             np.random.seed(((t & 0xff000000) >> 24) +
@@ -85,15 +97,18 @@ class ScenenetRgbdDatasetSingle(Dataset):
         #             tf.write('%s %s\n' % (self.scenes[self.sceneImageIndices[i][0]].scene_id, self.sceneImageIndices[i][1]))
 
         print('num images', len(self.sceneImageIndices))
-        
+
         self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
                                                       config.RPN_ANCHOR_RATIOS,
                                                       config.BACKBONE_SHAPES,
                                                       config.BACKBONE_STRIDES,
                                                       config.RPN_ANCHOR_STRIDE)
-    
+
     def __len__(self):
         return len(self.sceneImageIndices)
+
+    def get_num_plane_ids(self):
+        return len(self.scene_id_sc_plane_to_plane_id)
     
     def __getitem__(self, index_cam_idx):
         raise ValueError('not supported')
