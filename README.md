@@ -2,6 +2,21 @@
 
 ![schematic](https://github.com/LRMPUT/sprcnn/raw/master/images/sprcnn.jpg)
 
+## Paper
+
+If you find Stereo Plane R-CNN useful in your academic work please cite the following paper:
+
+    @article{wietrzykowski2022,
+        author={Wietrzykowski, Jan and Belter, Dominik},
+        journal={IEEE Robotics and Automation Letters}, 
+        title={{Stereo Plane R-CNN: Accurate Scene Geometry Reconstruction Using Planar Segments and Camera-Agnostic Representation}}, 
+        year={2022},
+        volume={7},
+        number={2},
+        pages={4345-4352},
+        doi={10.1109/LRA.2022.3150841}
+     }
+
 ## Instalation
 
 Clone the repository:
