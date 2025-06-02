@@ -36,7 +36,7 @@ pip install opencv-python disjoint-set pytorch-lightning
 
 The `SceneNet Stereo` dataset can be downloaded [here](https://putpoznanpl-my.sharepoint.com/:f:/g/personal/jan_wietrzykowski_put_poznan_pl/ErZm6If9-91JtW7BEK4pXJcBWKLwhoujwisDu_tLDjik2Q?e=vgnlnM).
 
-The `TERRINet` dataset can be downloaded [here](https://putpoznanpl-my.sharepoint.com/:f:/g/personal/jan_wietrzykowski_put_poznan_pl/Eqj0TnSgDrlJuJu0FC-bVGEB2hbpWHC_YA_l_qs9EDgkjw?e=JYRBIT).
+The `TERRINet` dataset can be downloaded [here](https://putpoznanpl-my.sharepoint.com/:u:/g/personal/dominik_belter_put_poznan_pl/EcyH5jlfC29Gl0N2C8gfpZMBFIjUzN-LgpBIn5WrZ4Wiag?e=zPDDKA).
 
 ## Training
 
